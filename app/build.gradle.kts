@@ -46,6 +46,9 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
+    implementation(libs.core)
+    implementation(libs.litert.support.api)
+    implementation(libs.androidx.tools.core)
 
     // CameraX
     val cameraxVersion = "1.6.0"

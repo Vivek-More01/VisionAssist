@@ -7,80 +7,69 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import java.util.Locale
 
-class VoiceAgent(private val context: Context, private val onCommandHeard: (String) -> Unit) : TextToSpeech.OnInitListener {
+class VoiceAgent(
+    private val context: Context,
+    private val onCommandCaptured: (String) -> Unit
+) : TextToSpeech.OnInitListener {
 
     private var tts: TextToSpeech? = null
     private var speechRecognizer: SpeechRecognizer? = null
-    private var isTtsReady = false
-    private var isListening = false
-
-    private var lastSpokenText: String = ""
-    private var lastSpokenTime: Long = 0
-    private val debounceDelayMs = 3000L
+    private val recognitionIntent: Intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+    }
 
     init {
         tts = TextToSpeech(context, this)
         setupSpeechRecognizer()
     }
 
+    private fun setupSpeechRecognizer() {
+        speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) { Log.d("VoiceAgent", "Ready for speech") }
+            override fun onBeginningOfSpeech() {}
+            override fun onRmsChanged(rmsdB: Float) {}
+            override fun onBufferReceived(buffer: ByteArray?) {}
+            override fun onEndOfSpeech() {}
+            override fun onError(error: Int) { Log.e("VoiceAgent", "STT Error: $error") }
+            override fun onResults(results: Bundle?) {
+                val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                if (!matches.isNullOrEmpty()) {
+                    onCommandCaptured(matches[0])
+                }
+            }
+            override fun onPartialResults(partialResults: Bundle?) {}
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+    }
+
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
             tts?.language = Locale.US
-            isTtsReady = true
-            speak("Vision Assist is active. Tap anywhere to speak.", force = true)
+            tts?.setPitch(1.0f)
+            tts?.setSpeechRate(1.1f) // Slightly faster for real-time nav
         }
     }
 
+    /**
+     * Speaks the given text.
+     * @param force If true, clears the audio backlog immediately before speaking.
+     */
     fun speak(text: String, force: Boolean = false) {
-        if (!isTtsReady || isListening) return // Don't speak while listening
-
-        val currentTime = System.currentTimeMillis()
-        if (!force && text == lastSpokenText && (currentTime - lastSpokenTime) < debounceDelayMs) {
-            return
-        }
-
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "VisionAssistTTS")
-        lastSpokenText = text
-        lastSpokenTime = currentTime
-    }
-
-    private fun setupSpeechRecognizer() {
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
-            speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) { speak("Listening", force = true) }
-                override fun onBeginningOfSpeech() {}
-                override fun onRmsChanged(rmsdB: Float) {}
-                override fun onBufferReceived(buffer: ByteArray?) {}
-                override fun onEndOfSpeech() { isListening = false }
-                override fun onError(error: Int) {
-                    isListening = false
-                    speak("I didn't catch that.", force = true)
-                }
-                override fun onResults(results: Bundle?) {
-                    isListening = false
-                    val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    if (!matches.isNullOrEmpty()) {
-                        onCommandHeard(matches[0]) // Send command to LLM
-                    }
-                }
-                override fun onPartialResults(partialResults: Bundle?) {}
-                override fun onEvent(eventType: Int, params: Bundle?) {}
-            })
-        }
+        // FLUSH guarantees the AI doesn't stack commands and stutter
+        val queueMode = if (force) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        val utteranceId = "NavUtterance_${System.currentTimeMillis()}"
+        tts?.speak(text, queueMode, null, utteranceId)
     }
 
     fun listenForCommand() {
-        if (isListening) return
-        isListening = true
-        tts?.stop() // Stop talking so we can listen
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-        }
-        speechRecognizer?.startListening(intent)
+        // CRITICAL: Stop TTS before listening so the mic doesn't record the app's own voice
+        tts?.stop()
+        speechRecognizer?.startListening(recognitionIntent)
     }
 
     fun shutdown() {

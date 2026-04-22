@@ -42,10 +42,10 @@ class SpatialAnalyzer(
         return relations.toList()
     }
 
-    /** * Hardcoded safety interrupt. Bypasses LLM if object is dangerously close.
+    /** * Hardcoded safety interrupt. Bypasses LLM if object is dangerously close. 
      * Width threshold lowered to 80f to ensure narrower obstacles (like chair legs) still trigger a stop.
      */
-    fun checkReflexCollision(objects: List<DetectedObject>, dangerDepthThreshold: Float = 200f): Pair<Boolean, String?> {
+    fun checkReflexCollision(objects: List<DetectedObject>, dangerDepthThreshold: Float = 225f): Pair<Boolean, String?> {
         for (obj in objects) {
             if (obj.distanceMetric > dangerDepthThreshold && obj.bbox.width() > 80f) {
                 return Pair(true, obj.className)

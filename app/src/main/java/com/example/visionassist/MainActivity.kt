@@ -32,10 +32,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
+import androidx.core.graphics.toColorInt
 
 class MainActivity : ComponentActivity() {
     private val requestPermissionLauncher = registerForActivityResult(
@@ -59,12 +59,9 @@ class MainActivity : ComponentActivity() {
 fun VisionMainScreen() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val coroutineScope = rememberCoroutineScope()
 
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     val spatialAnalyzer = remember { SpatialAnalyzer() }
-
-    // Initializing the new offline, zero-latency rule-based brain
     val ruleBasedBrain = remember { RuleBasedBrain() }
 
     var renderObjects by remember { mutableStateOf<List<DetectedObject>>(emptyList()) }
@@ -75,10 +72,18 @@ fun VisionMainScreen() {
     val currentSceneJson by rememberUpdatedState(latestSceneJson)
     var visionAnalyzerRef by remember { mutableStateOf<VisionAnalyzer?>(null) }
 
-    // TTS Lock prevents Navigation from interrupting the Agent
+    // TTS Timers & States for Strict Debouncing
     var lastAgentSpeakTime by remember { mutableStateOf(0L) }
+    var lastNavCommand by remember { mutableStateOf("") }
+    var lastNavSpeakTime by remember { mutableStateOf(0L) }
+    var wasTargetFound by remember { mutableStateOf(false) }
 
-    // FIX: Avoiding the circular reference error by using a nullable variable wrapper
+    // PERFORMANCE OPTIMIZATION: Pre-allocate Paint objects
+    val textPaint = remember { android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 55f; isFakeBoldText = true; setShadowLayer(4f, 0f, 0f, android.graphics.Color.BLACK) } }
+    val bgPaint = remember { android.graphics.Paint().apply { color = "#CC000000".toColorInt() } }
+    val navPaint = remember { android.graphics.Paint().apply { textSize = 80f; textAlign = android.graphics.Paint.Align.CENTER; isFakeBoldText = true; setShadowLayer(5f, 0f, 0f, android.graphics.Color.BLACK) } }
+    val tapPaint = remember { android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 45f; textAlign = android.graphics.Paint.Align.CENTER; setShadowLayer(5f, 0f, 0f, android.graphics.Color.BLACK) } }
+
     val voiceAgent = remember {
         var agent: VoiceAgent? = null
         agent = VoiceAgent(context) { cmd ->
@@ -87,6 +92,7 @@ fun VisionMainScreen() {
             // Update state
             activeTargets = action.targetObjects
             visionAnalyzerRef?.activeTargets = action.targetObjects
+            wasTargetFound = false // Reset pathfinding state on new target
 
             // Prioritize Agent Voice
             lastAgentSpeakTime = System.currentTimeMillis()
@@ -95,14 +101,29 @@ fun VisionMainScreen() {
         agent!!
     }
 
+    // --- STRICT NAVIGATION DEBOUNCER ---
     val navCommand = currentNavState?.command
     LaunchedEffect(navCommand) {
         if (navCommand != null && !navCommand.contains("Scanning")) {
-            // DEBOUNCE: Do not speak navigation commands if the agent spoke within the last 4 seconds
-            if (System.currentTimeMillis() - lastAgentSpeakTime > 4000L) {
-                val cleanCommand = navCommand.replace(Regex("[^a-zA-Z0-9 ]"), "").trim()
-                if (cleanCommand.isNotEmpty()) {
-                    voiceAgent.speak(cleanCommand, force = false)
+            val currentTime = System.currentTimeMillis()
+            val isNewCommand = navCommand != lastNavCommand
+
+            // 1. Agent Priority: Don't talk over Caution/Target alerts for 3.5 seconds
+            if (currentTime - lastAgentSpeakTime > 3500L) {
+
+                // 2. Command Gap Enforcement:
+                // New directions wait 1.5s to prevent self-interruption.
+                // Identical repeating directions wait 4.0s to prevent spam.
+                val requiredCooldown = if (isNewCommand) 1500L else 4000L
+
+                if (currentTime - lastNavSpeakTime > requiredCooldown) {
+                    val cleanCommand = navCommand.replace(Regex("[^a-zA-Z0-9 ,.]"), "").trim()
+                    if (cleanCommand.isNotEmpty()) {
+                        // FORCE=TRUE guarantees we flush the audio queue so commands never stack up
+                        voiceAgent.speak(cleanCommand, force = true)
+                        lastNavCommand = navCommand
+                        lastNavSpeakTime = currentTime
+                    }
                 }
             }
         }
@@ -111,7 +132,6 @@ fun VisionMainScreen() {
     DisposableEffect(Unit) {
         onDispose {
             cameraExecutor.shutdown()
-            // FIX: Removed agenticBrain.close() to clear the unresolved reference error
             voiceAgent.shutdown()
         }
     }
@@ -135,11 +155,28 @@ fun VisionMainScreen() {
                     val analyzer = VisionAnalyzer(ctx, spatialAnalyzer) { objs, nav, isCollision, dangerObj ->
                         renderObjects = objs
                         currentNavState = nav
+                        val currentTime = System.currentTimeMillis()
 
-                        if (isCollision) {
-                            lastAgentSpeakTime = System.currentTimeMillis()
-                            voiceAgent.speak("STOP! $dangerObj ahead!", force = true)
+                        // --- COLLISION TRIGGER ---
+                        if (isCollision && currentTime - lastAgentSpeakTime > 3500L) {
+                            lastAgentSpeakTime = currentTime
+                            voiceAgent.speak("Caution, $dangerObj close ahead.", force = true)
                         }
+
+                        // --- TARGET FOUND TRIGGER ---
+                        val isTargetFound = nav.aStarPath != null && activeTargets.isNotEmpty()
+                        if (isTargetFound && !wasTargetFound) {
+                            if (currentTime - lastAgentSpeakTime > 2000L) {
+                                lastAgentSpeakTime = currentTime
+                                voiceAgent.speak("Path to ${activeTargets[0]} found. Follow the directions.", force = true)
+                            }
+                        } else if (!isTargetFound && wasTargetFound && activeTargets.isNotEmpty()) {
+                            if (currentTime - lastAgentSpeakTime > 2000L) {
+                                lastAgentSpeakTime = currentTime
+                                voiceAgent.speak("Lost target. Scanning.", force = true)
+                            }
+                        }
+                        wasTargetFound = isTargetFound
 
                         try {
                             val json = JSONObject().apply {
@@ -157,7 +194,12 @@ fun VisionMainScreen() {
                     }
 
                     visionAnalyzerRef = analyzer
-                    val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().also { it.setAnalyzer(cameraExecutor, analyzer) }
+                    val analysis = ImageAnalysis.Builder()
+                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                        .setTargetRotation(previewView.display?.rotation ?: android.view.Surface.ROTATION_0)
+                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .build()
+                        .also { it.setAnalyzer(cameraExecutor, analyzer) }
 
                     try {
                         provider.unbindAll()
@@ -174,7 +216,6 @@ fun VisionMainScreen() {
             val oX = (size.width - nav.frameWidth * scale) / 2f
             val oY = (size.height - nav.frameHeight * scale) / 2f
 
-            // 1. Render Safety Sectors
             val sectorWidth = size.width / 10f
             nav.sectorScores.forEachIndexed { i, s ->
                 val color = if (i == nav.bestSector) Color.Green else if (s < 40) Color.Red else Color.Gray
@@ -182,7 +223,6 @@ fun VisionMainScreen() {
                 drawRect(color = color.copy(alpha = alpha), topLeft = Offset(i * sectorWidth, size.height * 0.45f), size = Size(sectorWidth, size.height * 0.55f))
             }
 
-            // 2. Render A* Path (Yellow Line)
             nav.aStarPath?.let { pathPoints ->
                 if (pathPoints.isNotEmpty()) {
                     val path = Path()
@@ -193,7 +233,6 @@ fun VisionMainScreen() {
                 }
             }
 
-            // 3. Render High-Visibility Bounding Boxes
             renderObjects.forEach { o ->
                 val l = o.bbox.left * scale + oX
                 val t = o.bbox.top * scale + oY
@@ -211,30 +250,20 @@ fun VisionMainScreen() {
 
                 drawContext.canvas.nativeCanvas.apply {
                     val label = "${o.className.uppercase()} [${o.distanceMetric.toInt()}]"
-                    val textPaint = android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 55f; isFakeBoldText = true; setShadowLayer(4f, 0f, 0f, android.graphics.Color.BLACK) }
                     val textWidth = textPaint.measureText(label)
-                    val bgPaint = android.graphics.Paint().apply { color = android.graphics.Color.parseColor("#CC000000") }
 
                     drawRect(l, t - 65f, l + textWidth + 20f, t, bgPaint)
                     drawText(label, l + 10f, t - 15f, textPaint)
                 }
             }
 
-            // 4. Render Master Navigation Command
             val displayCommand = if (activeTargets.isNotEmpty() && nav.aStarPath == null) "SEEKING: ${activeTargets.joinToString(", ").uppercase()}" else nav.command
 
-            drawContext.canvas.nativeCanvas.drawText(
-                displayCommand, size.width / 2f, 150f,
-                android.graphics.Paint().apply {
-                    color = if ("STOP" in displayCommand) android.graphics.Color.RED else android.graphics.Color.GREEN
-                    textSize = 80f; textAlign = android.graphics.Paint.Align.CENTER; isFakeBoldText = true; setShadowLayer(5f, 0f, 0f, android.graphics.Color.BLACK)
-                }
-            )
-
-            drawContext.canvas.nativeCanvas.drawText(
-                "TAP SCREEN TO SPEAK", size.width / 2f, size.height - 80f,
-                android.graphics.Paint().apply { color = android.graphics.Color.WHITE; textSize = 45f; textAlign = android.graphics.Paint.Align.CENTER; setShadowLayer(5f, 0f, 0f, android.graphics.Color.BLACK) }
-            )
+            drawContext.canvas.nativeCanvas.apply {
+                navPaint.color = if ("STOP" in displayCommand) android.graphics.Color.RED else android.graphics.Color.GREEN
+                drawText(displayCommand, size.width / 2f, 150f, navPaint)
+                drawText("TAP SCREEN TO SPEAK", size.width / 2f, size.height - 80f, tapPaint)
+            }
         }
     }
 }

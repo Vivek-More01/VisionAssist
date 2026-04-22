@@ -1,6 +1,5 @@
 package com.example.visionassist
 
-
 import android.util.Log
 
 data class AgentAction(
@@ -16,36 +15,40 @@ class RuleBasedBrain {
         val lowerCmd = voiceCommand.lowercase().trim()
         Log.i("RuleBasedBrain", "Processing Voice Command: $lowerCmd")
 
-        // 1. SEEK COMMAND ("find chair", "where is the door")
-        if (lowerCmd.contains("find") || lowerCmd.contains("where is") || lowerCmd.contains("look for")) {
-            val target = extractTarget(lowerCmd)
-            if (target.isNotEmpty()) {
-                return AgentAction(
-                    intent = "seek",
-                    targetObjects = listOf(target),
-                    action = "scan",
-                    voiceResponse = "Looking for $target."
-                )
+        // 1. ROBUST SEEK COMMAND (Extracts the exact object name)
+        val seekPrefixes = listOf("find the ", "find a ", "find ", "where is the ", "where is a ", "where is ", "look for the ", "look for a ", "look for ")
+        for (prefix in seekPrefixes) {
+            if (lowerCmd.contains(prefix)) {
+                // Splits by space/punctuation and grabs the very next word
+                val target = lowerCmd.substringAfter(prefix).trim().split(Regex("[\\s.,!?]+")).firstOrNull() ?: ""
+                if (target.isNotEmpty() && target.length > 1) {
+                    return AgentAction(
+                        intent = "seek",
+                        targetObjects = listOf(target),
+                        action = "scan",
+                        voiceResponse = "Looking for $target. Please pan the camera."
+                    )
+                }
             }
         }
 
-        // 2. EXPLORE COMMAND ("navigate", "go")
-        if (lowerCmd.contains("navigate") || lowerCmd.contains("go") || lowerCmd.contains("start")) {
+        // 2. EXPLORE/DEFAULT COMMAND
+        if (lowerCmd.contains("navigate") || lowerCmd.contains("go") || lowerCmd.contains("start") || lowerCmd.contains("resume")) {
             return AgentAction(
                 intent = "explore",
-                targetObjects = emptyList(), // Clears targets, enters general avoidance mode
+                targetObjects = emptyList(), // Clears targets to resume general avoidance
                 action = "go_straight",
-                voiceResponse = "Starting navigation."
+                voiceResponse = "Resuming obstacle avoidance."
             )
         }
 
         // 3. STOP COMMAND
-        if (lowerCmd.contains("stop") || lowerCmd.contains("halt")) {
+        if (lowerCmd.contains("stop") || lowerCmd.contains("halt") || lowerCmd.contains("pause")) {
             return AgentAction(
                 intent = "stop",
                 targetObjects = emptyList(),
                 action = "stop",
-                voiceResponse = "Navigation stopped."
+                voiceResponse = "Navigation paused."
             )
         }
 
@@ -54,19 +57,7 @@ class RuleBasedBrain {
             intent = "unknown",
             targetObjects = emptyList(),
             action = "scan",
-            voiceResponse = "Command not recognized. Please say find an object, or navigate."
+            voiceResponse = "Command not recognized. Say 'find' an object, or 'navigate'."
         )
-    }
-
-    private fun extractTarget(command: String): String {
-        // Simple regex-style extraction
-        val prefixes = listOf("find the ", "find a ", "find ", "where is the ", "where is a ", "where is ", "look for the ", "look for a ", "look for ")
-        for (prefix in prefixes) {
-            if (command.contains(prefix)) {
-                // Returns the immediate next word (e.g., "chair", "person")
-                return command.substringAfter(prefix).trim().split(Regex("\\s+")).firstOrNull() ?: ""
-            }
-        }
-        return ""
     }
 }
