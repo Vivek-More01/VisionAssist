@@ -11,38 +11,70 @@ data class AgentAction(
 
 class RuleBasedBrain {
 
+    // 1. Entity Resolution Map: Maps spoken synonyms to exact COCO labels
+    private val entityMap = mapOf(
+        "person" to "person", "man" to "person", "woman" to "person", "human" to "person",
+        "chair" to "chair", "seat" to "chair",
+        "couch" to "couch", "sofa" to "couch",
+        "potted plant" to "potted plant", "plant" to "potted plant",
+        "bed" to "bed",
+        "dining table" to "dining table", "table" to "dining table", "desk" to "dining table",
+        "tv" to "tv", "television" to "tv", "screen" to "tv", "monitor" to "tv",
+        "keyboard" to "keyboard",
+        "cell phone" to "cell phone", "phone" to "cell phone", "mobile" to "cell phone",
+        "book" to "book"
+    )
+
     fun processCommand(voiceCommand: String): AgentAction {
         val lowerCmd = voiceCommand.lowercase().trim()
         Log.i("RuleBasedBrain", "Processing Voice Command: $lowerCmd")
 
-        // 1. ROBUST SEEK COMMAND (Extracts the exact object name)
-        val seekPrefixes = listOf("find the ", "find a ", "find ", "where is the ", "where is a ", "where is ", "look for the ", "look for a ", "look for ")
-        for (prefix in seekPrefixes) {
-            if (lowerCmd.contains(prefix)) {
-                // Splits by space/punctuation and grabs the very next word
-                val target = lowerCmd.substringAfter(prefix).trim().split(Regex("[\\s.,!?]+")).firstOrNull() ?: ""
-                if (target.isNotEmpty() && target.length > 1) {
+        // 1. DESCRIBE COMMAND
+        if (lowerCmd.contains("describe") || lowerCmd.contains("what is around") || lowerCmd.contains("what do you see")) {
+            return AgentAction(
+                intent = "describe",
+                targetObjects = emptyList(),
+                action = "describe_scene",
+                voiceResponse = "Analyzing scene..."
+            )
+        }
+
+        // 2. ROBUST SEEK COMMAND (Entity Matching)
+        val seekPrefixes = listOf("find", "where is", "look for", "search for")
+        if (seekPrefixes.any { lowerCmd.contains(it) }) {
+            // Search the command for any known entity
+            for ((synonym, cocoLabel) in entityMap) {
+                // Pad with word boundaries to prevent "plant" matching inside "plantation"
+                if (lowerCmd.matches(Regex(".*\\b$synonym\\b.*"))) {
                     return AgentAction(
                         intent = "seek",
-                        targetObjects = listOf(target),
+                        targetObjects = listOf(cocoLabel),
                         action = "scan",
-                        voiceResponse = "Looking for $target. Please pan the camera."
+                        voiceResponse = "Looking for $cocoLabel. Please pan the camera."
                     )
                 }
             }
+
+            // If they asked to find something not in the dictionary
+            return AgentAction(
+                intent = "unknown",
+                targetObjects = emptyList(),
+                action = "scan",
+                voiceResponse = "I am not trained to detect that object yet."
+            )
         }
 
-        // 2. EXPLORE/DEFAULT COMMAND
+        // 3. EXPLORE/DEFAULT COMMAND
         if (lowerCmd.contains("navigate") || lowerCmd.contains("go") || lowerCmd.contains("start") || lowerCmd.contains("resume")) {
             return AgentAction(
                 intent = "explore",
-                targetObjects = emptyList(), // Clears targets to resume general avoidance
+                targetObjects = emptyList(),
                 action = "go_straight",
                 voiceResponse = "Resuming obstacle avoidance."
             )
         }
 
-        // 3. STOP COMMAND
+        // 4. STOP COMMAND
         if (lowerCmd.contains("stop") || lowerCmd.contains("halt") || lowerCmd.contains("pause")) {
             return AgentAction(
                 intent = "stop",
@@ -52,12 +84,12 @@ class RuleBasedBrain {
             )
         }
 
-        // 4. FALLBACK
+        // 5. FALLBACK
         return AgentAction(
             intent = "unknown",
             targetObjects = emptyList(),
             action = "scan",
-            voiceResponse = "Command not recognized. Say 'find' an object, or 'navigate'."
+            voiceResponse = "Command not recognized. Say 'describe scene', 'find an object', or 'navigate'."
         )
     }
 }
