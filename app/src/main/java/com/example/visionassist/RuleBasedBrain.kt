@@ -11,7 +11,7 @@ data class AgentAction(
 
 class RuleBasedBrain {
 
-    // 1. Entity Resolution Map: Maps spoken synonyms to exact COCO labels
+    // 1. Entity Resolution Map: Translates spoken synonyms to exact YOLO/COCO labels
     private val entityMap = mapOf(
         "person" to "person", "man" to "person", "woman" to "person", "human" to "person",
         "chair" to "chair", "seat" to "chair",
@@ -35,7 +35,7 @@ class RuleBasedBrain {
                 intent = "describe",
                 targetObjects = emptyList(),
                 action = "describe_scene",
-                voiceResponse = "Analyzing scene..."
+                voiceResponse = "Analyzing scene..." // Gets overridden in MainActivity
             )
         }
 
@@ -44,7 +44,7 @@ class RuleBasedBrain {
         if (seekPrefixes.any { lowerCmd.contains(it) }) {
             // Search the command for any known entity
             for ((synonym, cocoLabel) in entityMap) {
-                // Pad with word boundaries to prevent "plant" matching inside "plantation"
+                // Word boundaries (\b) prevent "plant" from matching inside "plantation"
                 if (lowerCmd.matches(Regex(".*\\b$synonym\\b.*"))) {
                     return AgentAction(
                         intent = "seek",
@@ -55,7 +55,6 @@ class RuleBasedBrain {
                 }
             }
 
-            // If they asked to find something not in the dictionary
             return AgentAction(
                 intent = "unknown",
                 targetObjects = emptyList(),

@@ -17,6 +17,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
@@ -57,6 +59,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun VisionMainScreen() {
+    var isFlashlightOn by remember { mutableStateOf(false) }
+    var cameraControl by remember { mutableStateOf<androidx.camera.core.CameraControl?>(null) }
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -94,17 +98,16 @@ fun VisionMainScreen() {
     }
     // Keep your State variables at the top...
     val latestNavState by rememberUpdatedState(currentNavState) // FIX: Ensures VoiceAgent reads fresh data
-
+    var lastManualCommandTime by remember { mutableStateOf(0L) }
     val voiceAgent = remember {
         var agent: VoiceAgent? = null
         agent = VoiceAgent(context) { cmd ->
             val action = ruleBasedBrain.processCommand(cmd)
 
             if (action.intent == "describe") {
-                // FIX: Use 'latestNavState' here instead of 'currentNavState'
+                // Uses 'latestNavState' to ensure the lambda reads fresh Compose state
                 val relations = latestNavState?.spatialRelations ?: emptyList()
                 val uniqueObjects = renderObjects.map { it.className }.distinct()
-                // ...
 
                 val description = if (relations.isNotEmpty()) {
                     "I see ${uniqueObjects.joinToString(", ")}. " + relations.joinToString(". ")
@@ -114,18 +117,20 @@ fun VisionMainScreen() {
                     "The scene is clear."
                 }
 
-                lastAgentSpeakTime = System.currentTimeMillis()
-                agent?.speak(description, force = true)
+                // Tell the Priority Queue to say this immediately, interrupting normal navigation
+                lastManualCommandTime = System.currentTimeMillis() // START GRACE PERIOD
+                agent?.speak(description, priority = SpeechPriority.HIGH)
             } else {
                 activeTargets = action.targetObjects
                 visionAnalyzerRef?.activeTargets = action.targetObjects
                 wasTargetFound = false
 
-                lastAgentSpeakTime = System.currentTimeMillis()
-                agent?.speak(action.voiceResponse, force = true)
+                // Acknowledge the user's command immediately
+                lastManualCommandTime = System.currentTimeMillis() // START GRACE PERIOD
+                agent?.speak(action.voiceResponse, priority = SpeechPriority.HIGH)
             }
         }
-        agent
+        agent!!
     }
 
     DisposableEffect(Unit) {
@@ -156,68 +161,50 @@ fun VisionMainScreen() {
                         currentNavState = nav
                         val currentTime = System.currentTimeMillis()
 
-                        // --- UNIFIED AUDIO DISPATCHER (5 FPS Tick) ---
+                        // --- UNIFIED AUDIO DISPATCHER (Priority Queued) ---
 
-                        // 1. COLLISION (Highest Priority)
-                        if (isCollision && currentTime - lastAgentSpeakTime > 3500L) {
-                            lastAgentSpeakTime = currentTime
-                            voiceAgent.speak("Caution, $dangerObj close ahead.", force = true)
+                        val cleanCommand = nav.command.replace(Regex("[^a-zA-Z0-9 ,.]"), "").trim()
+
+                        // If it has been less than 8 seconds since the user asked a question, stay quiet.
+                        val isGracePeriod = (currentTime - lastManualCommandTime) < 8000L
+
+                        // 1. COLLISION (Highest Priority - ALWAYS plays, ignores grace period)
+                        if (isCollision) {
+                            voiceAgent.speak("Caution, $dangerObj close ahead.", SpeechPriority.CRITICAL)
                         }
-                        // 2. TARGET ARRIVAL (Destination Reached)
+                        // 2. CRITICAL NAVIGATION OVERRIDES
+                        else if (!isGracePeriod && (nav.command.contains("STOP") || nav.command.contains("BACK UP") || nav.command.contains("BLOCKED"))) {
+                            voiceAgent.speak(cleanCommand, SpeechPriority.CRITICAL)
+                        }
+                        // 3. TARGET ARRIVAL
                         else if (nav.command.contains("ARRIVED") && activeTargets.isNotEmpty()) {
-                            lastAgentSpeakTime = currentTime
-                            voiceAgent.speak("You are very near your destination. You have reached the ${activeTargets[0]}.", force = true)
-
-                            // Reset state so the AI stops searching and returns to avoidance mode
+                            voiceAgent.speak("You have reached the ${activeTargets[0]}.", SpeechPriority.HIGH)
                             activeTargets = emptyList()
                             visionAnalyzerRef?.activeTargets = emptyList()
                             wasTargetFound = false
                         }
-                        // 3. TARGET FOUND / LOST (While Seeking)
+                        // 4. TARGET SEEKING LOGIC
                         else if (activeTargets.isNotEmpty()) {
                             val isTargetFound = nav.aStarPath != null
                             if (isTargetFound && !wasTargetFound) {
-                                if (currentTime - lastAgentSpeakTime > 2000L) {
-                                    lastAgentSpeakTime = currentTime
-                                    voiceAgent.speak("Path to ${activeTargets[0]} found. Follow the directions.", force = true)
-                                }
+                                voiceAgent.speak("Path to ${activeTargets[0]} found. Follow the directions.", SpeechPriority.HIGH)
                             } else if (!isTargetFound && wasTargetFound) {
-                                if (currentTime - lastAgentSpeakTime > 2000L) {
-                                    lastAgentSpeakTime = currentTime
-                                    voiceAgent.speak("Lost target. Scanning.", force = true)
-                                }
+                                voiceAgent.speak("Lost target. Scanning.", SpeechPriority.HIGH)
                             }
                             wasTargetFound = isTargetFound
 
-                            // Speak normal navigation cues while following path
-                            if (currentTime - lastAgentSpeakTime > 3500L) {
-                                val isNewCommand = nav.command != lastNavCommand
-                                val requiredCooldown = if (isNewCommand) 1500L else 4000L
-                                if (currentTime - lastNavSpeakTime > requiredCooldown) {
-                                    val cleanCommand = nav.command.replace(Regex("[^a-zA-Z0-9 ,.]"), "").trim()
-                                    if (cleanCommand.isNotEmpty() && !cleanCommand.contains("Scanning")) {
-                                        voiceAgent.speak(cleanCommand, force = true)
-                                        lastNavCommand = nav.command
-                                        lastNavSpeakTime = currentTime
-                                    }
-                                }
+                            // Normal nav is muted during grace period
+                            if (!isGracePeriod && cleanCommand.isNotEmpty() && !cleanCommand.contains("Scanning")) {
+                                voiceAgent.speak(cleanCommand, SpeechPriority.NORMAL)
                             }
                         }
-                        // 4. NORMAL NAVIGATION (Explore Mode)
-                        else if (currentTime - lastAgentSpeakTime > 3500L) {
-                            val isNewCommand = nav.command != lastNavCommand
-                            val requiredCooldown = if (isNewCommand) 1500L else 4000L
-
-                            if (currentTime - lastNavSpeakTime > requiredCooldown) {
-                                val cleanCommand = nav.command.replace(Regex("[^a-zA-Z0-9 ,.]"), "").trim()
-                                if (cleanCommand.isNotEmpty() && !cleanCommand.contains("Scanning")) {
-                                    voiceAgent.speak(cleanCommand, force = true)
-                                    lastNavCommand = nav.command
-                                    lastNavSpeakTime = currentTime
-                                }
+                        // 5. NORMAL EXPLORATION
+                        else {
+                            // Normal nav is muted during grace period
+                            if (!isGracePeriod && cleanCommand.isNotEmpty() && !cleanCommand.contains("Scanning")) {
+                                voiceAgent.speak(cleanCommand, SpeechPriority.NORMAL)
                             }
                         }
-
                         // JSON Construction logic remains the same...
                         try {
                             // ...
@@ -245,7 +232,9 @@ fun VisionMainScreen() {
 
                     try {
                         provider.unbindAll()
-                        provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                        val camera = provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
+                        // Capture the control instance!
+                        cameraControl = camera.cameraControl
                     } catch (e: Exception) { Log.e("Vision", "Bind failed", e) }
                 }, ContextCompat.getMainExecutor(ctx))
                 previewView
@@ -319,6 +308,16 @@ fun VisionMainScreen() {
                 drawText(displayCommand, size.width / 2f, 150f, navPaint)
                 drawText("TAP SCREEN TO SPEAK", size.width / 2f, size.height - 80f, tapPaint)
             }
+        }
+        // Put this inside your main Box{}, below the Canvas{} so it floats on top
+        androidx.compose.material3.Button(
+            onClick = {
+                isFlashlightOn = !isFlashlightOn
+                cameraControl?.enableTorch(isFlashlightOn)
+            },
+            modifier = Modifier.align(androidx.compose.ui.Alignment.TopEnd).padding(16.dp)
+        ) {
+            androidx.compose.material3.Text(if (isFlashlightOn) "🔦 OFF" else "🔦 ON")
         }
     }
 }

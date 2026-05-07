@@ -69,10 +69,14 @@ class VisionAnalyzer(
         58 to "potted plant",
         59 to "bed",
         60 to "dining table",
-        62 to "tv",
+        62 to "monitor",
+        63 to "laptop",
         66 to "keyboard",
         67 to "cell phone",
-        73 to "book"
+        73 to "book",
+        24 to "backpack",
+        39 to "bottle",
+        60 to "table"
     )
 
     private var handLandmarker: HandLandmarker? = null
@@ -398,30 +402,48 @@ class VisionAnalyzer(
     val sectorWDepth = depthInputSize.toFloat() / numSectors
     val sectorWScreen = width / numSectors.toFloat()
 
-    // 1. Calculate Raw Sector Scores
+    // 1. Calculate Dual-Layer Sector Scores
     for (i in 0 until numSectors) {
-        var depthSum = 0f; var count = 0
+        var floorSum = 0f; var floorCount = 0
+        var headSum = 0f; var headCount = 0
+
         val startX = (i * sectorWDepth).toInt()
         val endX = ((i + 1) * sectorWDepth).toInt()
 
-        // Analyze bottom 60% of the depth map
+        // A. Floor Scan (Bottom 60% for walking path)
         for (y in (depthInputSize * 0.4).toInt() until depthInputSize) {
             for (x in startX until endX) {
-                depthSum += depthOutputMap[y][x]
-                count++
+                floorSum += depthOutputMap[y][x]; floorCount++
             }
         }
 
-        // MATH: 0 is far, 255 is close.
-        // We subtract from 255 so that open space (0) yields a high safety score (255).
-        sectorScores[i] = max(0f, 255f - (if (count > 0) depthSum / count else 0f))
+        // B. Head-Space Scan (Top 40% for overhangs)
+        for (y in 0 until (depthInputSize * 0.4).toInt()) {
+            for (x in startX until endX) {
+                headSum += depthOutputMap[y][x]; headCount++
+            }
+        }
+
+        val floorAvg = if (floorCount > 0) floorSum / floorCount else 0f
+        val headAvg = if (headCount > 0) headSum / headCount else 0f
+
+        // Base score is derived ONLY from the floor path
+        sectorScores[i] = max(0f, 255f - floorAvg)
+
+        // C. OVERHANG PENALTY
+        // If something is physically hovering in the top half (metric > 180 out of 255)
+        // It doesn't matter if the floor is clear; this sector is dangerous.
+        if (headAvg > 180f) {
+            sectorScores[i] = min(sectorScores[i], 15f)
+        }
 
         // 2. Apply YOLO Obstacle Penalties
         val sLeft = i * sectorWScreen
         val sRight = (i + 1) * sectorWScreen
         for (obj in detectedObjects) {
-            if (obj.bbox.right > sLeft && obj.bbox.left < sRight && obj.bbox.bottom > height * 0.4f) {
-                // Metric > 150 means the detected object is physically close
+            // FIX: Removed the vertical height constraint!
+            // If an object is horizontally in this sector and close to the camera, tank the score.
+            if (obj.bbox.right > sLeft && obj.bbox.left < sRight) {
                 if (obj.distanceMetric > 150f) sectorScores[i] = min(sectorScores[i], 20f)
             }
         }
@@ -481,7 +503,15 @@ class VisionAnalyzer(
                     else -> mapSectorToCommand(bestSector, isTarget = true)
                 }
             } else {
-                rawNavCmd = "🔍 Scanning for target..."
+                rawNavCmd = when {
+                    isWallBlindness -> "🛑 BACK UP"
+                    centerIsBlocked && hasAlternative -> {
+                        bestSector = alternativeSector
+                        "⚠️ BLOCKED: TURN ${if(bestSector < 5) "LEFT" else "RIGHT"}"
+                    }
+                    centerIsBlocked -> "🛑 STOP"
+                    else -> mapSectorToCommand(bestSector, isTarget = false)
+                }
             }
         }
     } else {
